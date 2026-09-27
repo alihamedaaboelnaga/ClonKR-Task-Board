@@ -1,13 +1,26 @@
 /* =========================================================
-   SHARED TASK BOARD — script.js
-   Features: per-owner filtering, date filtering, reset UI
+   SHARED TASK BOARD — script.js (Supabase version)
 ========================================================= */
 
 /* ---------------------------------------------------------
-   CONSTANTS
+   1. SUPABASE CONFIG  ✅ جاهزة
 --------------------------------------------------------- */
 
-const STORAGE_KEY = "shared-task-board.tasks";
+const SUPABASE_URL = "https://ehmabwajvgjodptqnyqi.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_3jVhLzBVSfGflE-h6ZWbdg_9AcUXvdM";
+
+/* ---------------------------------------------------------
+   2. INIT SUPABASE CLIENT
+--------------------------------------------------------- */
+
+const supabaseClient = window.supabase.createClient(
+  SUPABASE_URL,
+  SUPABASE_ANON_KEY
+);
+
+/* ---------------------------------------------------------
+   3. CONSTANTS
+--------------------------------------------------------- */
 
 const STATUSES = [
   { value: "todo", label: "To Do" },
@@ -15,8 +28,6 @@ const STATUSES = [
   { value: "done", label: "Done" },
 ];
 
-/* Avatar colour palette — assigned by a hash of the owner name,
-   so every owner always gets the same colour. */
 const AVATAR_PALETTE = [
   { bg: "#dbeafe", fg: "#1d4ed8" },
   { bg: "#dcfce7", fg: "#15803d" },
@@ -27,42 +38,34 @@ const AVATAR_PALETTE = [
 ];
 
 /* ---------------------------------------------------------
-   STATE
+   4. STATE
 --------------------------------------------------------- */
 
-let tasks = loadTasks();
-
-/* "all" or an owner name such as "Ali" / "Mohamed" */
+let tasks = [];
 let filterOwner = "all";
 
 /* ---------------------------------------------------------
-   DOM REFERENCES
+   5. DOM REFERENCES
 --------------------------------------------------------- */
 
 const els = {
   datePicker: document.getElementById("datePicker"),
   addTaskBtn: document.getElementById("addTaskBtn"),
-
   ownerFilters: document.getElementById("ownerFilters"),
   filterSummary: document.getElementById("filterSummary"),
   resetBtn: document.getElementById("resetBtn"),
-
   totalTasks: document.getElementById("totalTasks"),
   progressTasks: document.getElementById("progressTasks"),
   completedTasks: document.getElementById("completedTasks"),
-
   todoList: document.getElementById("todoList"),
   doingList: document.getElementById("doingList"),
   doneList: document.getElementById("doneList"),
-
   todoCount: document.getElementById("todoCount"),
   doingCount: document.getElementById("doingCount"),
   doneCount: document.getElementById("doneCount"),
-
   modal: document.getElementById("modal"),
   closeModal: document.getElementById("closeModal"),
   cancelBtn: document.getElementById("cancelBtn"),
-
   taskForm: document.getElementById("taskForm"),
   taskName: document.getElementById("taskName"),
   taskOwner: document.getElementById("taskOwner"),
@@ -70,55 +73,8 @@ const els = {
 };
 
 /* ---------------------------------------------------------
-   STORAGE
+   6. UTILITIES
 --------------------------------------------------------- */
-
-function loadTasks() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    const parsed = raw ? JSON.parse(raw) : [];
-
-    if (!Array.isArray(parsed)) return [];
-
-    /* Validate and normalise every saved task so a corrupt
-       entry can never break the board. */
-    return parsed
-      .filter((task) => task && typeof task === "object")
-      .map((task) => ({
-        id: String(task.id ?? createId()),
-        name: String(task.name ?? "Untitled task"),
-        owner: String(task.owner ?? "Unassigned"),
-        notes: String(task.notes ?? ""),
-        status: STATUSES.some((s) => s.value === task.status)
-          ? task.status
-          : "todo",
-        date: String(task.date ?? todayISO()),
-        createdAt: Number(task.createdAt) || Date.now(),
-      }));
-  } catch (error) {
-    console.warn("Could not read saved tasks:", error);
-    return [];
-  }
-}
-
-function saveTasks() {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
-  } catch (error) {
-    console.warn("Could not save tasks:", error);
-  }
-}
-
-/* ---------------------------------------------------------
-   UTILITIES
---------------------------------------------------------- */
-
-function createId() {
-  if (window.crypto && typeof window.crypto.randomUUID === "function") {
-    return window.crypto.randomUUID();
-  }
-  return `task-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
 
 function todayISO() {
   const now = new Date();
@@ -145,8 +101,6 @@ function getAvatarColors(name) {
   return AVATAR_PALETTE[hash % AVATAR_PALETTE.length];
 }
 
-/* Reads the owner list straight from the <select> in the modal,
-   so the HTML stays the single source of truth. */
 function getOwners() {
   return Array.from(els.taskOwner.options)
     .map((option) => option.value.trim())
@@ -154,7 +108,54 @@ function getOwners() {
 }
 
 /* ---------------------------------------------------------
-   FILTERING
+   7. DATABASE OPERATIONS
+--------------------------------------------------------- */
+
+async function fetchTasks() {
+  const { data, error } = await supabaseClient
+    .from("tasks")
+    .select("*")
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    console.error("Failed to fetch tasks:", error.message);
+    return;
+  }
+
+  tasks = data || [];
+  render();
+}
+
+async function dbInsertTask(task) {
+  const { error } = await supabaseClient.from("tasks").insert([task]);
+  if (error) {
+    console.error("Insert failed:", error.message);
+    alert("Could not save task: " + error.message);
+  }
+}
+
+async function dbUpdateStatus(id, status) {
+  const { error } = await supabaseClient
+    .from("tasks")
+    .update({ status })
+    .eq("id", id);
+
+  if (error) {
+    console.error("Update failed:", error.message);
+    alert("Could not update task: " + error.message);
+  }
+}
+
+async function dbDeleteTask(id) {
+  const { error } = await supabaseClient.from("tasks").delete().eq("id", id);
+  if (error) {
+    console.error("Delete failed:", error.message);
+    alert("Could not delete task: " + error.message);
+  }
+}
+
+/* ---------------------------------------------------------
+   8. FILTERING
 --------------------------------------------------------- */
 
 function getVisibleTasks() {
@@ -168,16 +169,16 @@ function getVisibleTasks() {
 }
 
 /* ---------------------------------------------------------
-   RENDERING
+   9. RENDERING
 --------------------------------------------------------- */
 
 function render() {
   const visible = getVisibleTasks();
 
   const groups = {
-    todo: visible.filter((task) => task.status === "todo"),
-    doing: visible.filter((task) => task.status === "doing"),
-    done: visible.filter((task) => task.status === "done"),
+    todo: visible.filter((t) => t.status === "todo"),
+    doing: visible.filter((t) => t.status === "doing"),
+    done: visible.filter((t) => t.status === "done"),
   };
 
   renderColumn(els.todoList, groups.todo);
@@ -203,21 +204,16 @@ function renderColumn(listEl, listTasks) {
     return;
   }
 
-  /* Newest tasks first inside each column */
-  [...listTasks]
-    .sort((a, b) => b.createdAt - a.createdAt)
-    .forEach((task) => listEl.appendChild(createTaskCard(task)));
+  listTasks.forEach((task) => listEl.appendChild(createTaskCard(task)));
 }
 
 function createEmptyState() {
   const empty = document.createElement("p");
   empty.className = "empty-state";
-
   empty.textContent =
     filterOwner === "all"
       ? "No tasks for this day"
       : `No tasks for ${filterOwner} on this day`;
-
   return empty;
 }
 
@@ -226,7 +222,6 @@ function createTaskCard(task) {
   card.className = "task" + (task.status === "done" ? " completed" : "");
   card.dataset.id = task.id;
 
-  /* ---------- Top row: title + delete ---------- */
   const top = document.createElement("div");
   top.className = "task-top";
 
@@ -245,15 +240,13 @@ function createTaskCard(task) {
   top.append(title, deleteBtn);
   card.appendChild(top);
 
-  /* ---------- Notes ---------- */
-  if (task.notes.trim()) {
+  if (task.notes && task.notes.trim()) {
     const notes = document.createElement("p");
     notes.className = "task-notes";
     notes.textContent = task.notes;
     card.appendChild(notes);
   }
 
-  /* ---------- Bottom row: owner + status ---------- */
   const bottom = document.createElement("div");
   bottom.className = "task-bottom";
 
@@ -297,14 +290,12 @@ function createTaskCard(task) {
 }
 
 /* ---------------------------------------------------------
-   FILTER CHIPS
+   10. FILTER CHIPS
 --------------------------------------------------------- */
 
 function buildOwnerFilters() {
   els.ownerFilters.innerHTML = "";
-
   els.ownerFilters.appendChild(createChip("all", "All"));
-
   getOwners().forEach((owner) => {
     els.ownerFilters.appendChild(createChip(owner, owner));
   });
@@ -312,19 +303,12 @@ function buildOwnerFilters() {
 
 function createChip(value, label) {
   const chip = document.createElement("button");
-
   chip.type = "button";
   chip.className = "chip" + (filterOwner === value ? " active" : "");
   chip.dataset.owner = value;
   chip.textContent = label;
-
-  chip.setAttribute(
-    "aria-pressed",
-    filterOwner === value ? "true" : "false"
-  );
-
+  chip.setAttribute("aria-pressed", filterOwner === value ? "true" : "false");
   chip.addEventListener("click", () => setOwnerFilter(value));
-
   return chip;
 }
 
@@ -350,10 +334,10 @@ function updateFilterSummary() {
 }
 
 /* ---------------------------------------------------------
-   ACTIONS
+   11. ACTION HANDLERS
 --------------------------------------------------------- */
 
-function handleAddTask(event) {
+async function handleAddTask(event) {
   event.preventDefault();
 
   const name = els.taskName.value.trim();
@@ -363,19 +347,15 @@ function handleAddTask(event) {
   }
 
   const newTask = {
-    id: createId(),
     name,
     owner: els.taskOwner.value || "Unassigned",
     notes: els.taskNotes.value.trim(),
     status: "todo",
     date: els.datePicker.value || todayISO(),
-    createdAt: Date.now(),
   };
 
-  tasks.push(newTask);
-  saveTasks();
+  await dbInsertTask(newTask);
 
-  /* Make sure the task the user just created is actually visible */
   if (filterOwner !== "all" && newTask.owner !== filterOwner) {
     filterOwner = "all";
     updateChipStates();
@@ -386,60 +366,46 @@ function handleAddTask(event) {
   }
 
   closeModal();
-  render();
 }
 
-function handleStatusChange(id, status) {
-  const task = tasks.find((item) => item.id === id);
+async function handleStatusChange(id, status) {
+  const task = tasks.find((t) => t.id === id);
   if (!task || task.status === status) return;
-
-  task.status = status;
-  saveTasks();
-  render();
+  await dbUpdateStatus(id, status);
 }
 
-function handleDelete(id) {
-  const task = tasks.find((item) => item.id === id);
+async function handleDelete(id) {
+  const task = tasks.find((t) => t.id === id);
   if (!task) return;
 
   const confirmed = window.confirm(`Delete "${task.name}"?`);
   if (!confirmed) return;
 
-  tasks = tasks.filter((item) => item.id !== id);
-  saveTasks();
-  render();
+  await dbDeleteTask(id);
 }
 
 /* ---------------------------------------------------------
-   RESET UI
-   Restores the interface to its default state:
-   today's date, "All" owners, closed modal, cleared form.
+   12. RESET UI
 --------------------------------------------------------- */
 
 function resetUI() {
   filterOwner = "all";
-
   els.datePicker.value = todayISO();
-
   els.taskForm.reset();
   closeModal();
-
   updateChipStates();
   render();
 }
 
 /* ---------------------------------------------------------
-   MODAL
+   13. MODAL
 --------------------------------------------------------- */
 
 function openModal() {
   els.taskForm.reset();
-
-  /* Pre-select the owner currently being filtered */
   if (filterOwner !== "all") {
     els.taskOwner.value = filterOwner;
   }
-
   els.modal.classList.remove("hidden");
   els.taskName.focus();
 }
@@ -449,7 +415,7 @@ function closeModal() {
 }
 
 /* ---------------------------------------------------------
-   EVENTS
+   14. EVENTS
 --------------------------------------------------------- */
 
 function bindEvents() {
@@ -458,35 +424,49 @@ function bindEvents() {
   els.cancelBtn.addEventListener("click", closeModal);
 
   els.taskForm.addEventListener("submit", handleAddTask);
-
   els.resetBtn.addEventListener("click", resetUI);
 
-  /* Close modal when clicking the dark backdrop */
   els.modal.addEventListener("click", (event) => {
     if (event.target === els.modal) closeModal();
   });
 
-  /* Close modal with Escape */
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && !els.modal.classList.contains("hidden")) {
       closeModal();
     }
   });
 
-  /* Date filter */
   els.datePicker.addEventListener("change", render);
 }
 
 /* ---------------------------------------------------------
-   INIT
+   15. REALTIME SUBSCRIPTION
 --------------------------------------------------------- */
 
-function init() {
-  els.datePicker.value = todayISO();
+function subscribeToChanges() {
+  supabaseClient
+    .channel("tasks-channel")
+    .on(
+      "postgres_changes",
+      { event: "*", schema: "public", table: "tasks" },
+      () => {
+        fetchTasks();
+      }
+    )
+    .subscribe();
+}
 
+/* ---------------------------------------------------------
+   16. INIT
+--------------------------------------------------------- */
+
+async function init() {
+  els.datePicker.value = todayISO();
   buildOwnerFilters();
   bindEvents();
-  render();
+
+  await fetchTasks();
+  subscribeToChanges();
 }
 
 document.addEventListener("DOMContentLoaded", init);
