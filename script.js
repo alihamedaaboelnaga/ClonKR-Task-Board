@@ -1,7 +1,6 @@
 /* =========================================================
-   SHARED TASK BOARD — script.js
-   Assigned date · In-Progress counter · Completed date
-   + per-status colours
+   SHARED TASK BOARD — script.js (v3)
+   Optimistic updates + debounced realtime + safe controls
 ========================================================= */
 
 /* ---------------------------------------------------------
@@ -41,7 +40,8 @@ const AVATAR_PALETTE = [
 
 let tasks = [];
 let filterOwner = "all";
-let tickerHandle = null; // setInterval for live "In progress" counter
+let tickerHandle = null;
+let fetchDebounceHandle = null;
 
 /* ---------------------------------------------------------
    4. DOM REFERENCES
@@ -74,6 +74,18 @@ const els = {
    5. UTILITIES
 --------------------------------------------------------- */
 
+function makeId() {
+  if (window.crypto && typeof window.crypto.randomUUID === "function") {
+    return window.crypto.randomUUID();
+  }
+  // Fallback for older browsers
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
 function getInitials(name) {
   return name
     .trim()
@@ -97,7 +109,6 @@ function getOwners() {
     .filter(Boolean);
 }
 
-/* "30 Sep 2026" */
 function formatDate(value) {
   if (!value) return "—";
   const d = new Date(value);
@@ -109,7 +120,6 @@ function formatDate(value) {
   });
 }
 
-/* "30 Sep 2026 · 14:30" */
 function formatDateTime(value) {
   if (!value) return "—";
   const d = new Date(value);
@@ -126,7 +136,6 @@ function formatDateTime(value) {
   return `${date} · ${time}`;
 }
 
-/* "just now" / "3 hrs" / "2 days" / "1 mo 5 days" */
 function humanDuration(ms) {
   if (ms < 0) ms = 0;
 
@@ -165,30 +174,24 @@ async function fetchTasks() {
 }
 
 async function dbInsertTask(task) {
-  const { error } = await supabaseClient.from("tasks").insert([task]);
-  if (error) {
-    console.error("Insert failed:", error.message);
-    alert("Could not save task: " + error.message);
-  }
+  return supabaseClient.from("tasks").insert([task]);
 }
 
 async function dbUpdateTask(id, updates) {
-  const { error } = await supabaseClient
-    .from("tasks")
-    .update(updates)
-    .eq("id", id);
-  if (error) {
-    console.error("Update failed:", error.message);
-    alert("Could not update task: " + error.message);
-  }
+  return supabaseClient.from("tasks").update(updates).eq("id", id);
 }
 
 async function dbDeleteTask(id) {
-  const { error } = await supabaseClient.from("tasks").delete().eq("id", id);
-  if (error) {
-    console.error("Delete failed:", error.message);
-    alert("Could not delete task: " + error.message);
-  }
+  return supabaseClient.from("tasks").delete().eq("id", id);
+}
+
+/* Debounced fetch — avoids multiple rapid re-renders */
+function scheduleFetch() {
+  if (fetchDebounceHandle) clearTimeout(fetchDebounceHandle);
+  fetchDebounceHandle = setTimeout(() => {
+    fetchDebounceHandle = null;
+    fetchTasks();
+  }, 200);
 }
 
 /* ---------------------------------------------------------
@@ -286,17 +289,21 @@ function createTaskCard(task) {
   const timeline = document.createElement("div");
   timeline.className = "task-timeline";
 
-  /* 1) Assigned */
-  timeline.appendChild(
-    createTimelineRow({
-      color: "blue",
-      label: "Assigned",
-      value: formatDateTime(task.created_at),
-      hint: humanDuration(Date.now() - new Date(task.created_at).getTime()) + " ago",
-    })
-  );
+  /* Assigned */
+  if (task.created_at) {
+    timeline.appendChild(
+      createTimelineRow({
+        color: "blue",
+        label: "Assigned",
+        value: formatDateTime(task.created_at),
+        hint:
+          humanDuration(Date.now() - new Date(task.created_at).getTime()) +
+          " ago",
+      })
+    );
+  }
 
-  /* 2) In progress counter — only when doing */
+  /* In progress counter */
   if (task.status === "doing" && task.started_at) {
     const elapsedMs = Date.now() - new Date(task.started_at).getTime();
     timeline.appendChild(
@@ -311,7 +318,7 @@ function createTaskCard(task) {
     );
   }
 
-  /* 3) Completed — only when done */
+  /* Completed */
   if (task.status === "done" && task.completed_at) {
     const totalMs =
       new Date(task.completed_at).getTime() -
@@ -360,9 +367,10 @@ function createTaskCard(task) {
     option.selected = task.status === s.value;
     select.appendChild(option);
   });
-  select.addEventListener("change", () =>
-    handleStatusChange(task.id, select.value)
-  );
+
+  select.addEventListener("change", () => {
+    handleStatusChange(task.id, select.value);
+  });
 
   bottom.append(owner, select);
   card.appendChild(bottom);
@@ -370,7 +378,6 @@ function createTaskCard(task) {
   return card;
 }
 
-/* Helper: builds one row inside the timeline */
 function createTimelineRow({ color, label, value, hint, live, taskId }) {
   const row = document.createElement("div");
   row.className = "timeline-row";
@@ -389,7 +396,6 @@ function createTimelineRow({ color, label, value, hint, live, taskId }) {
   valueEl.className = "timeline-value";
   valueEl.textContent = value;
 
-  /* live rows need a hook for the ticker to update them */
   if (live && taskId) {
     valueEl.dataset.live = "duration";
     valueEl.dataset.taskId = taskId;
@@ -401,12 +407,6 @@ function createTimelineRow({ color, label, value, hint, live, taskId }) {
     const hintEl = document.createElement("span");
     hintEl.className = "timeline-hint";
     hintEl.textContent = hint;
-
-    if (live && taskId) {
-      hintEl.dataset.live = "hint";
-      hintEl.dataset.taskId = taskId;
-      hintEl.dataset.since = ""; // filled by ticker below
-    }
     text.appendChild(hintEl);
   }
 
@@ -416,21 +416,18 @@ function createTimelineRow({ color, label, value, hint, live, taskId }) {
 
 /* ---------------------------------------------------------
    9. LIVE TICKER
-   Updates "In progress for X" every 30 s without a re-render.
 --------------------------------------------------------- */
 
 function startTicker() {
   if (tickerHandle) clearInterval(tickerHandle);
 
   tickerHandle = setInterval(() => {
-    document
-      .querySelectorAll('[data-live="duration"]')
-      .forEach((el) => {
-        const task = tasks.find((t) => t.id === el.dataset.taskId);
-        if (!task || !task.started_at) return;
-        const ms = Date.now() - new Date(task.started_at).getTime();
-        el.textContent = humanDuration(ms);
-      });
+    document.querySelectorAll('[data-live="duration"]').forEach((el) => {
+      const task = tasks.find((t) => t.id === el.dataset.taskId);
+      if (!task || !task.started_at) return;
+      const ms = Date.now() - new Date(task.started_at).getTime();
+      el.textContent = humanDuration(ms);
+    });
   }, 30000);
 }
 
@@ -477,7 +474,7 @@ function updateFilterSummary() {
 }
 
 /* ---------------------------------------------------------
-   11. ACTION HANDLERS
+   11. ACTION HANDLERS  — optimistic + rollback on error
 --------------------------------------------------------- */
 
 async function handleAddTask(event) {
@@ -489,62 +486,119 @@ async function handleAddTask(event) {
     return;
   }
 
-  const newTask = {
+  /* -------- Optimistic insert -------- */
+  const tempId = makeId();
+  const nowIso = new Date().toISOString();
+
+  const optimistic = {
+    id: tempId,
     name,
     owner: els.taskOwner.value || "Unassigned",
     notes: els.taskNotes.value.trim(),
     status: "todo",
-    date: new Date().toISOString().slice(0, 10),
+    date: nowIso.slice(0, 10),
+    created_at: nowIso,
+    started_at: null,
+    completed_at: null,
   };
 
-  await dbInsertTask(newTask);
+  tasks.unshift(optimistic);
 
-  if (filterOwner !== "all" && newTask.owner !== filterOwner) {
+  if (filterOwner !== "all" && optimistic.owner !== filterOwner) {
     filterOwner = "all";
     updateChipStates();
   }
 
+  render();
   closeModal();
+
+  /* -------- Persist -------- */
+  const payload = {
+    id: optimistic.id,
+    name: optimistic.name,
+    owner: optimistic.owner,
+    notes: optimistic.notes,
+    status: optimistic.status,
+    date: optimistic.date,
+  };
+
+  const { error } = await dbInsertTask(payload);
+
+  if (error) {
+    console.error("Insert failed:", error.message);
+    tasks = tasks.filter((t) => t.id !== tempId);
+    render();
+    alert("Could not save task: " + error.message);
+  }
+  // realtime will reconcile timestamps
 }
 
 async function handleStatusChange(id, status) {
   const task = tasks.find((t) => t.id === id);
   if (!task || task.status === status) return;
 
+  /* Save previous values for rollback */
+  const previous = {
+    status: task.status,
+    started_at: task.started_at,
+    completed_at: task.completed_at,
+  };
+
+  /* Build updates based on transition */
   const updates = { status };
 
-  /* Entering "doing" — start the counter if not already running */
   if (status === "doing" && !task.started_at) {
     updates.started_at = new Date().toISOString();
   }
-
-  /* Going back to "todo" — reset counter */
   if (status === "todo") {
     updates.started_at = null;
     updates.completed_at = null;
   }
-
-  /* Entering "done" — stamp completion and, if needed, start time */
   if (status === "done") {
     updates.completed_at = new Date().toISOString();
     if (!task.started_at) {
       updates.started_at = new Date().toISOString();
     }
   }
-
-  /* Leaving "done" — remove completion stamp */
   if (status !== "done" && task.status === "done") {
     updates.completed_at = null;
   }
 
-  await dbUpdateTask(id, updates);
+  /* -------- Optimistic update -------- */
+  Object.assign(task, updates);
+  render();
+
+  /* -------- Persist -------- */
+  const { error } = await dbUpdateTask(id, updates);
+
+  if (error) {
+    console.error("Update failed:", error.message);
+    Object.assign(task, previous);
+    render();
+    alert("Could not update task: " + error.message);
+  }
+  // realtime will reconcile with server state
 }
 
 async function handleDelete(id) {
   const task = tasks.find((t) => t.id === id);
   if (!task) return;
   if (!window.confirm(`Delete "${task.name}"?`)) return;
-  await dbDeleteTask(id);
+
+  /* -------- Optimistic delete -------- */
+  const index = tasks.indexOf(task);
+  tasks.splice(index, 1);
+  render();
+
+  /* -------- Persist -------- */
+  const { error } = await dbDeleteTask(id);
+
+  if (error) {
+    console.error("Delete failed:", error.message);
+    tasks.splice(index, 0, task);
+    render();
+    alert("Could not delete task: " + error.message);
+  }
 }
 
 /* ---------------------------------------------------------
@@ -598,7 +652,7 @@ function bindEvents() {
 }
 
 /* ---------------------------------------------------------
-   15. REALTIME SUBSCRIPTION
+   15. REALTIME SUBSCRIPTION  (debounced)
 --------------------------------------------------------- */
 
 function subscribeToChanges() {
@@ -607,7 +661,7 @@ function subscribeToChanges() {
     .on(
       "postgres_changes",
       { event: "*", schema: "public", table: "tasks" },
-      () => fetchTasks()
+      () => scheduleFetch()
     )
     .subscribe();
 }
