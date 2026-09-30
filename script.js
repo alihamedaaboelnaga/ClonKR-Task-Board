@@ -1,17 +1,15 @@
 /* =========================================================
-   SHARED TASK BOARD — script.js (Supabase version)
+   SHARED TASK BOARD — script.js
+   Assigned date · In-Progress counter · Completed date
+   + per-status colours
 ========================================================= */
 
 /* ---------------------------------------------------------
-   1. SUPABASE CONFIG  ✅ جاهزة
+   1. SUPABASE CONFIG
 --------------------------------------------------------- */
 
 const SUPABASE_URL = "https://ehmabwajvgjodptqnyqi.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_3jVhLzBVSfGflE-h6ZWbdg_9AcUXvdM";
-
-/* ---------------------------------------------------------
-   2. INIT SUPABASE CLIENT
---------------------------------------------------------- */
 
 const supabaseClient = window.supabase.createClient(
   SUPABASE_URL,
@@ -19,7 +17,7 @@ const supabaseClient = window.supabase.createClient(
 );
 
 /* ---------------------------------------------------------
-   3. CONSTANTS
+   2. CONSTANTS
 --------------------------------------------------------- */
 
 const STATUSES = [
@@ -38,18 +36,18 @@ const AVATAR_PALETTE = [
 ];
 
 /* ---------------------------------------------------------
-   4. STATE
+   3. STATE
 --------------------------------------------------------- */
 
 let tasks = [];
 let filterOwner = "all";
+let tickerHandle = null; // setInterval for live "In progress" counter
 
 /* ---------------------------------------------------------
-   5. DOM REFERENCES
+   4. DOM REFERENCES
 --------------------------------------------------------- */
 
 const els = {
-  datePicker: document.getElementById("datePicker"),
   addTaskBtn: document.getElementById("addTaskBtn"),
   ownerFilters: document.getElementById("ownerFilters"),
   filterSummary: document.getElementById("filterSummary"),
@@ -73,23 +71,15 @@ const els = {
 };
 
 /* ---------------------------------------------------------
-   6. UTILITIES
+   5. UTILITIES
 --------------------------------------------------------- */
-
-function todayISO() {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
 
 function getInitials(name) {
   return name
     .trim()
     .split(/\s+/)
     .slice(0, 2)
-    .map((part) => part.charAt(0).toUpperCase())
+    .map((p) => p.charAt(0).toUpperCase())
     .join("");
 }
 
@@ -103,12 +93,61 @@ function getAvatarColors(name) {
 
 function getOwners() {
   return Array.from(els.taskOwner.options)
-    .map((option) => option.value.trim())
+    .map((o) => o.value.trim())
     .filter(Boolean);
 }
 
+/* "30 Sep 2026" */
+function formatDate(value) {
+  if (!value) return "—";
+  const d = new Date(value);
+  if (isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+}
+
+/* "30 Sep 2026 · 14:30" */
+function formatDateTime(value) {
+  if (!value) return "—";
+  const d = new Date(value);
+  if (isNaN(d.getTime())) return "—";
+  const date = d.toLocaleDateString("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+  const time = d.toLocaleTimeString("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  return `${date} · ${time}`;
+}
+
+/* "just now" / "3 hrs" / "2 days" / "1 mo 5 days" */
+function humanDuration(ms) {
+  if (ms < 0) ms = 0;
+
+  const mins = Math.floor(ms / 60000);
+  const hours = Math.floor(ms / 3600000);
+  const days = Math.floor(ms / 86400000);
+  const months = Math.floor(days / 30);
+
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} min`;
+  if (hours < 24) return `${hours} hr${hours > 1 ? "s" : ""}`;
+  if (days < 30) return `${days} day${days > 1 ? "s" : ""}`;
+
+  const extraDays = days - months * 30;
+  return extraDays > 0
+    ? `${months} mo ${extraDays} day${extraDays > 1 ? "s" : ""}`
+    : `${months} mo`;
+}
+
 /* ---------------------------------------------------------
-   7. DATABASE OPERATIONS
+   6. DATABASE OPERATIONS
 --------------------------------------------------------- */
 
 async function fetchTasks() {
@@ -121,7 +160,6 @@ async function fetchTasks() {
     console.error("Failed to fetch tasks:", error.message);
     return;
   }
-
   tasks = data || [];
   render();
 }
@@ -134,12 +172,11 @@ async function dbInsertTask(task) {
   }
 }
 
-async function dbUpdateStatus(id, status) {
+async function dbUpdateTask(id, updates) {
   const { error } = await supabaseClient
     .from("tasks")
-    .update({ status })
+    .update(updates)
     .eq("id", id);
-
   if (error) {
     console.error("Update failed:", error.message);
     alert("Could not update task: " + error.message);
@@ -155,21 +192,16 @@ async function dbDeleteTask(id) {
 }
 
 /* ---------------------------------------------------------
-   8. FILTERING
+   7. FILTERING
 --------------------------------------------------------- */
 
 function getVisibleTasks() {
-  const date = els.datePicker.value || todayISO();
-
-  return tasks.filter((task) => {
-    const sameDate = task.date === date;
-    const sameOwner = filterOwner === "all" || task.owner === filterOwner;
-    return sameDate && sameOwner;
-  });
+  if (filterOwner === "all") return tasks;
+  return tasks.filter((t) => t.owner === filterOwner);
 }
 
 /* ---------------------------------------------------------
-   9. RENDERING
+   8. RENDERING
 --------------------------------------------------------- */
 
 function render() {
@@ -194,6 +226,7 @@ function render() {
   els.completedTasks.textContent = groups.done.length;
 
   updateFilterSummary();
+  startTicker();
 }
 
 function renderColumn(listEl, listTasks) {
@@ -212,16 +245,17 @@ function createEmptyState() {
   empty.className = "empty-state";
   empty.textContent =
     filterOwner === "all"
-      ? "No tasks for this day"
-      : `No tasks for ${filterOwner} on this day`;
+      ? "No tasks yet"
+      : `No tasks for ${filterOwner} yet`;
   return empty;
 }
 
 function createTaskCard(task) {
   const card = document.createElement("article");
-  card.className = "task" + (task.status === "done" ? " completed" : "");
+  card.className = `task task--${task.status}`;
   card.dataset.id = task.id;
 
+  /* -------- Top row -------- */
   const top = document.createElement("div");
   top.className = "task-top";
 
@@ -240,6 +274,7 @@ function createTaskCard(task) {
   top.append(title, deleteBtn);
   card.appendChild(top);
 
+  /* -------- Notes -------- */
   if (task.notes && task.notes.trim()) {
     const notes = document.createElement("p");
     notes.className = "task-notes";
@@ -247,6 +282,54 @@ function createTaskCard(task) {
     card.appendChild(notes);
   }
 
+  /* -------- Timeline -------- */
+  const timeline = document.createElement("div");
+  timeline.className = "task-timeline";
+
+  /* 1) Assigned */
+  timeline.appendChild(
+    createTimelineRow({
+      color: "blue",
+      label: "Assigned",
+      value: formatDateTime(task.created_at),
+      hint: humanDuration(Date.now() - new Date(task.created_at).getTime()) + " ago",
+    })
+  );
+
+  /* 2) In progress counter — only when doing */
+  if (task.status === "doing" && task.started_at) {
+    const elapsedMs = Date.now() - new Date(task.started_at).getTime();
+    timeline.appendChild(
+      createTimelineRow({
+        color: "amber",
+        label: "In progress for",
+        value: humanDuration(elapsedMs),
+        hint: `since ${formatDate(task.started_at)}`,
+        live: true,
+        taskId: task.id,
+      })
+    );
+  }
+
+  /* 3) Completed — only when done */
+  if (task.status === "done" && task.completed_at) {
+    const totalMs =
+      new Date(task.completed_at).getTime() -
+      new Date(task.created_at).getTime();
+
+    timeline.appendChild(
+      createTimelineRow({
+        color: "green",
+        label: "Completed",
+        value: formatDateTime(task.completed_at),
+        hint: `took ${humanDuration(totalMs)} total`,
+      })
+    );
+  }
+
+  card.appendChild(timeline);
+
+  /* -------- Bottom row -------- */
   const bottom = document.createElement("div");
   bottom.className = "task-bottom";
 
@@ -270,23 +353,85 @@ function createTaskCard(task) {
   const select = document.createElement("select");
   select.className = "status-select";
   select.setAttribute("aria-label", `Status for ${task.name}`);
-
-  STATUSES.forEach((status) => {
+  STATUSES.forEach((s) => {
     const option = document.createElement("option");
-    option.value = status.value;
-    option.textContent = status.label;
-    option.selected = task.status === status.value;
+    option.value = s.value;
+    option.textContent = s.label;
+    option.selected = task.status === s.value;
     select.appendChild(option);
   });
-
-  select.addEventListener("change", () => {
-    handleStatusChange(task.id, select.value);
-  });
+  select.addEventListener("change", () =>
+    handleStatusChange(task.id, select.value)
+  );
 
   bottom.append(owner, select);
   card.appendChild(bottom);
 
   return card;
+}
+
+/* Helper: builds one row inside the timeline */
+function createTimelineRow({ color, label, value, hint, live, taskId }) {
+  const row = document.createElement("div");
+  row.className = "timeline-row";
+
+  const dot = document.createElement("span");
+  dot.className = `timeline-dot dot-${color}`;
+
+  const text = document.createElement("div");
+  text.className = "timeline-text";
+
+  const labelEl = document.createElement("span");
+  labelEl.className = "timeline-label";
+  labelEl.textContent = label;
+
+  const valueEl = document.createElement("strong");
+  valueEl.className = "timeline-value";
+  valueEl.textContent = value;
+
+  /* live rows need a hook for the ticker to update them */
+  if (live && taskId) {
+    valueEl.dataset.live = "duration";
+    valueEl.dataset.taskId = taskId;
+  }
+
+  text.append(labelEl, valueEl);
+
+  if (hint) {
+    const hintEl = document.createElement("span");
+    hintEl.className = "timeline-hint";
+    hintEl.textContent = hint;
+
+    if (live && taskId) {
+      hintEl.dataset.live = "hint";
+      hintEl.dataset.taskId = taskId;
+      hintEl.dataset.since = ""; // filled by ticker below
+    }
+    text.appendChild(hintEl);
+  }
+
+  row.append(dot, text);
+  return row;
+}
+
+/* ---------------------------------------------------------
+   9. LIVE TICKER
+   Updates "In progress for X" every 30 s without a re-render.
+--------------------------------------------------------- */
+
+function startTicker() {
+  if (tickerHandle) clearInterval(tickerHandle);
+
+  tickerHandle = setInterval(() => {
+    document
+      .querySelectorAll('[data-live="duration"]')
+      .forEach((el) => {
+        const task = tasks.find((t) => t.id === el.dataset.taskId);
+        if (!task || !task.started_at) return;
+        const ms = Date.now() - new Date(task.started_at).getTime();
+        el.textContent = humanDuration(ms);
+      });
+  }, 30000);
 }
 
 /* ---------------------------------------------------------
@@ -296,9 +441,7 @@ function createTaskCard(task) {
 function buildOwnerFilters() {
   els.ownerFilters.innerHTML = "";
   els.ownerFilters.appendChild(createChip("all", "All"));
-  getOwners().forEach((owner) => {
-    els.ownerFilters.appendChild(createChip(owner, owner));
-  });
+  getOwners().forEach((o) => els.ownerFilters.appendChild(createChip(o, o)));
 }
 
 function createChip(value, label) {
@@ -351,7 +494,7 @@ async function handleAddTask(event) {
     owner: els.taskOwner.value || "Unassigned",
     notes: els.taskNotes.value.trim(),
     status: "todo",
-    date: els.datePicker.value || todayISO(),
+    date: new Date().toISOString().slice(0, 10),
   };
 
   await dbInsertTask(newTask);
@@ -361,26 +504,46 @@ async function handleAddTask(event) {
     updateChipStates();
   }
 
-  if (els.datePicker.value !== newTask.date) {
-    els.datePicker.value = newTask.date;
-  }
-
   closeModal();
 }
 
 async function handleStatusChange(id, status) {
   const task = tasks.find((t) => t.id === id);
   if (!task || task.status === status) return;
-  await dbUpdateStatus(id, status);
+
+  const updates = { status };
+
+  /* Entering "doing" — start the counter if not already running */
+  if (status === "doing" && !task.started_at) {
+    updates.started_at = new Date().toISOString();
+  }
+
+  /* Going back to "todo" — reset counter */
+  if (status === "todo") {
+    updates.started_at = null;
+    updates.completed_at = null;
+  }
+
+  /* Entering "done" — stamp completion and, if needed, start time */
+  if (status === "done") {
+    updates.completed_at = new Date().toISOString();
+    if (!task.started_at) {
+      updates.started_at = new Date().toISOString();
+    }
+  }
+
+  /* Leaving "done" — remove completion stamp */
+  if (status !== "done" && task.status === "done") {
+    updates.completed_at = null;
+  }
+
+  await dbUpdateTask(id, updates);
 }
 
 async function handleDelete(id) {
   const task = tasks.find((t) => t.id === id);
   if (!task) return;
-
-  const confirmed = window.confirm(`Delete "${task.name}"?`);
-  if (!confirmed) return;
-
+  if (!window.confirm(`Delete "${task.name}"?`)) return;
   await dbDeleteTask(id);
 }
 
@@ -390,7 +553,6 @@ async function handleDelete(id) {
 
 function resetUI() {
   filterOwner = "all";
-  els.datePicker.value = todayISO();
   els.taskForm.reset();
   closeModal();
   updateChipStates();
@@ -403,9 +565,7 @@ function resetUI() {
 
 function openModal() {
   els.taskForm.reset();
-  if (filterOwner !== "all") {
-    els.taskOwner.value = filterOwner;
-  }
+  if (filterOwner !== "all") els.taskOwner.value = filterOwner;
   els.modal.classList.remove("hidden");
   els.taskName.focus();
 }
@@ -426,17 +586,15 @@ function bindEvents() {
   els.taskForm.addEventListener("submit", handleAddTask);
   els.resetBtn.addEventListener("click", resetUI);
 
-  els.modal.addEventListener("click", (event) => {
-    if (event.target === els.modal) closeModal();
+  els.modal.addEventListener("click", (e) => {
+    if (e.target === els.modal) closeModal();
   });
 
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && !els.modal.classList.contains("hidden")) {
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !els.modal.classList.contains("hidden")) {
       closeModal();
     }
   });
-
-  els.datePicker.addEventListener("change", render);
 }
 
 /* ---------------------------------------------------------
@@ -449,9 +607,7 @@ function subscribeToChanges() {
     .on(
       "postgres_changes",
       { event: "*", schema: "public", table: "tasks" },
-      () => {
-        fetchTasks();
-      }
+      () => fetchTasks()
     )
     .subscribe();
 }
@@ -461,10 +617,8 @@ function subscribeToChanges() {
 --------------------------------------------------------- */
 
 async function init() {
-  els.datePicker.value = todayISO();
   buildOwnerFilters();
   bindEvents();
-
   await fetchTasks();
   subscribeToChanges();
 }
